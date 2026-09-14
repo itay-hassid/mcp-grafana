@@ -64,8 +64,8 @@
     "grafana_url": {
       "type": "string",
       "title": "Grafana URL",
-      "description": "URL to your Grafana instance (e.g., http://localhost:3000 or https://your-org.grafana.net)",
-      "required": true
+      "description": "URL to your Grafana instance (e.g., http://localhost:3000 or https://your-org.grafana.net). Optional: if left empty, use the set_grafana_url tool at runtime to configure it (and change it later) without restarting the server.",
+      "required": false
     },
     "service_account_token": {
       "type": "string",

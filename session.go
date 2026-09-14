@@ -75,6 +75,33 @@ type SessionState struct {
 	proxiedSet         *proxiedToolSet
 	proxiedSetReleased bool
 	mutex              sync.RWMutex
+
+	// grafanaOverride holds this session's runtime Grafana connection
+	// override, set via the set_grafana_url tool. nil means "no override for
+	// this session" — the connection's env/header-derived GrafanaConfig
+	// applies unchanged. Guarded by grafanaMu rather than mutex above: URL
+	// updates and proxied-tool attachment happen on independent call paths and
+	// must not serialize behind each other.
+	grafanaMu       sync.RWMutex
+	grafanaOverride *GrafanaOverride
+}
+
+// GrafanaOverride holds a per-session runtime override of the Grafana
+// connection, set via the set_grafana_url tool. It replaces the URL and
+// APIKey that would otherwise come from GRAFANA_URL/GRAFANA_SERVICE_ACCOUNT_TOKEN
+// (or request headers) for the lifetime of the session, or until overridden
+// again.
+type GrafanaOverride struct {
+	// URL is the normalized, validated Grafana base URL (e.g.
+	// "https://grafana.example.com"). Never empty for a stored override: a
+	// session either has no override (nil *GrafanaOverride) or a fully valid
+	// one.
+	URL string
+
+	// Token is the bearer token (service account token) to authenticate with.
+	// May be empty, meaning unauthenticated requests (or basic auth, if the
+	// connection's GrafanaConfig has BasicAuth set independently).
+	Token string
 }
 
 func newSessionState() *SessionState {
@@ -205,6 +232,40 @@ func (sm *SessionManager) GetSession(sessionID string) (*SessionState, bool) {
 		session.lastActivity = time.Now()
 	}
 	return session, exists
+}
+
+// SetGrafanaOverride stores or replaces the Grafana connection override for
+// the given session, set via the set_grafana_url tool. override.URL must
+// already be validated and normalized by the caller (see ValidateGrafanaURL);
+// this method does no validation of its own. It is a no-op if the session is
+// not tracked (e.g. a race with teardown), since there would be nothing left
+// to apply the override to.
+func (sm *SessionManager) SetGrafanaOverride(sessionID string, override GrafanaOverride) {
+	state, exists := sm.GetSession(sessionID)
+	if !exists {
+		return
+	}
+	state.grafanaMu.Lock()
+	state.grafanaOverride = &override
+	state.grafanaMu.Unlock()
+}
+
+// GrafanaOverrideForSession returns the current Grafana connection override
+// for a session, if one has been set via the set_grafana_url tool. ok is
+// false when the session is untracked or has never set an override, in which
+// case the caller should fall back to the connection's env/header-derived
+// GrafanaConfig unchanged.
+func (sm *SessionManager) GrafanaOverrideForSession(sessionID string) (override GrafanaOverride, ok bool) {
+	state, exists := sm.GetSession(sessionID)
+	if !exists {
+		return GrafanaOverride{}, false
+	}
+	state.grafanaMu.RLock()
+	defer state.grafanaMu.RUnlock()
+	if state.grafanaOverride == nil {
+		return GrafanaOverride{}, false
+	}
+	return *state.grafanaOverride, true
 }
 
 // sessionRegistered reports whether sessionID is still tracked and maps to the

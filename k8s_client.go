@@ -45,14 +45,19 @@ type KubernetesClient struct {
 // NewKubernetesClient creates a KubernetesClient from the GrafanaConfig in ctx.
 // It reuses BuildTransport so TLS, extra headers, OrgID, and user-agent are
 // handled the same way as for the legacy OpenAPI client.
+//
+// It returns an error if cfg.URL is empty (no GRAFANA_URL at startup and no
+// set_grafana_url call yet for this session), rather than defaulting to a
+// local instance. Callers (ExtractKubernetesClientFromEnv/Headers and the
+// cached HTTP variant) already log and store a nil client on error, which
+// K8s-backed tools treat as "fall back to the legacy API".
 func NewKubernetesClient(ctx context.Context) (*KubernetesClient, error) {
 	cfg := GrafanaConfigFromContext(ctx)
 
-	baseURL := cfg.URL
-	if baseURL == "" {
-		baseURL = defaultGrafanaURL
+	if !cfg.IsConfigured() {
+		return nil, fmt.Errorf("grafana URL is not configured")
 	}
-	baseURL = strings.TrimRight(baseURL, "/")
+	baseURL := strings.TrimRight(cfg.URL, "/")
 
 	transport, err := BuildTransport(&cfg, nil)
 	if err != nil {

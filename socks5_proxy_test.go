@@ -147,6 +147,12 @@ func TestProxiedToolSetKeyLogRedaction(t *testing.T) {
 // TestExtractIncidentClientFromHeadersFailsClosed mirrors the env-based
 // fail-closed test for the request-scoped incident client constructor.
 func TestExtractIncidentClientFromHeadersFailsClosed(t *testing.T) {
+	// A Grafana URL must be configured (here via env, since the request
+	// carries no override header) for extractKeyGrafanaInfoFromReq to yield a
+	// non-empty URL; otherwise ExtractIncidentClientFromHeaders injects a nil
+	// client rather than the fail-closed one this test exercises.
+	t.Setenv(grafanaURLEnvVar, "http://grafana.example.com")
+
 	baseCalled := false
 	mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
 		baseCalled = true
@@ -344,6 +350,11 @@ func TestBuildTransportSOCKS5Proxy(t *testing.T) {
 	})
 
 	t.Run("fail-closed incident client never sends requests when proxy is misconfigured", func(t *testing.T) {
+		// ExtractIncidentClientFromEnv injects a nil client when GRAFANA_URL
+		// is unset, so it must be configured for this test to exercise the
+		// fail-closed transport rather than the "unconfigured" nil-client path.
+		t.Setenv(grafanaURLEnvVar, "http://grafana.example.com")
+
 		baseCalled := false
 		mock := &capturingMockRT{fn: func(req *http.Request) (*http.Response, error) {
 			baseCalled = true

@@ -392,6 +392,17 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	return GrafanaConfigFromContext(ctx).LoggerOrDefault()
 }
 
+// IsConfigured reports whether a Grafana URL has been established for this
+// connection or session, either at startup (GRAFANA_URL / request headers) or
+// at runtime via the set_grafana_url tool. Tools that need a working Grafana
+// connection should check this — directly, or implicitly via
+// RequireGrafanaURLMiddleware, which already wraps every native tool except a
+// small allowlist that never reaches Grafana — before relying on
+// GrafanaClientFromContext returning a non-nil client.
+func (c GrafanaConfig) IsConfigured() bool {
+	return c.URL != ""
+}
+
 const (
 	// DefaultGrafanaClientTimeout is the default timeout for Grafana HTTP client requests.
 	DefaultGrafanaClientTimeout = 10 * time.Second
@@ -894,11 +905,14 @@ func BuildTransport(cfg *GrafanaConfig, base http.RoundTripper, opts ...Transpor
 }
 
 // Gets info from environment
+// extractKeyGrafanaInfoFromEnv reads the Grafana URL, token, basic auth, and
+// org ID from the environment. Unlike earlier versions of this function, an
+// unset GRAFANA_URL is returned as "" rather than defaulting to
+// defaultGrafanaURL: the server now starts successfully without a configured
+// Grafana instance, and callers (tool guardrails, client extractors) treat an
+// empty URL as "not configured yet" rather than "use localhost".
 func extractKeyGrafanaInfoFromEnv(logger *slog.Logger) (url, apiKey string, auth *url.Userinfo, orgId int64) {
 	url, apiKey = urlAndAPIKeyFromEnv(logger)
-	if url == "" {
-		url = defaultGrafanaURL
-	}
 	auth = userAndPassFromEnv()
 	orgId = orgIdFromEnv(logger)
 	return
@@ -1349,17 +1363,20 @@ func GrafanaVersion(ctx context.Context) string {
 // The client is automatically configured with the correct HTTP scheme, debug settings from context, custom TLS configuration if present, and OpenTelemetry instrumentation for distributed tracing.
 // It also fetches the Grafana instance's public URL and version from /api/frontend/settings, for deep link generation and version-dependent behaviour respectively.
 // The org ID is read from the GrafanaConfig in the context, which should be set by ExtractGrafanaInfoFromEnv or ExtractGrafanaInfoFromHeaders before calling this function.
+//
+// If grafanaURL is empty (no GRAFANA_URL at startup and no set_grafana_url
+// call yet for this session), NewGrafanaClient returns nil rather than
+// defaulting to a local instance. Callers already treat a nil client as "not
+// available" (see GrafanaClientFromContext), and RequireGrafanaURLMiddleware
+// rejects Grafana-dependent tool calls before they would ever observe it.
 func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.Userinfo) *GrafanaClient {
-	cfg := client.DefaultTransportConfig()
-
-	var parsedURL *url.URL
-	var err error
-
 	if grafanaURL == "" {
-		grafanaURL = defaultGrafanaURL
+		return nil
 	}
 
-	parsedURL, err = url.Parse(grafanaURL)
+	cfg := client.DefaultTransportConfig()
+
+	parsedURL, err := url.Parse(grafanaURL)
 	if err != nil {
 		panic(fmt.Errorf("invalid Grafana URL: %w", err))
 	}
@@ -1527,21 +1544,21 @@ func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.
 
 // ExtractGrafanaClientFromEnv is a StdioContextFunc that creates and injects a Grafana client into the context.
 // It uses configuration from GRAFANA_URL, GRAFANA_SERVICE_ACCOUNT_TOKEN (or deprecated GRAFANA_API_KEY), GRAFANA_USERNAME/PASSWORD environment variables to initialize
-// the client with proper authentication.
+// the client with proper authentication. The injected client is nil if
+// GRAFANA_URL is unset (not configured yet); callers must handle that via
+// GrafanaClientFromContext / RequireGrafanaURLMiddleware.
 var ExtractGrafanaClientFromEnv server.StdioContextFunc = func(ctx context.Context) context.Context {
-	// Extract transport config from env vars
 	logger := LoggerFromContext(ctx)
 	grafanaURL, apiKey := urlAndAPIKeyFromEnv(logger)
-	if grafanaURL == "" {
-		grafanaURL = defaultGrafanaURL
-	}
 	auth := userAndPassFromEnv()
 	grafanaClient := NewGrafanaClient(ctx, grafanaURL, apiKey, auth)
 	return WithGrafanaClient(ctx, grafanaClient)
 }
 
 // ExtractGrafanaClientFromHeaders is a HTTPContextFunc that creates and injects a Grafana client into the context.
-// It uses GRAFANA_URL with request-scoped authentication headers and environment fallbacks.
+// It uses GRAFANA_URL with request-scoped authentication headers and environment fallbacks. The injected client is
+// nil if no URL is configured via either source (not configured yet); callers must handle that via
+// GrafanaClientFromContext / RequireGrafanaURLMiddleware.
 var ExtractGrafanaClientFromHeaders httpContextFunc = func(ctx context.Context, req *http.Request) context.Context {
 	config := GrafanaConfigFromContext(ctx)
 	logger := config.LoggerOrDefault()
@@ -1621,13 +1638,14 @@ func KubernetesClientFromContext(ctx context.Context) *KubernetesClient {
 type incidentClientKey struct{}
 
 // ExtractIncidentClientFromEnv is a StdioContextFunc that creates and injects a Grafana Incident client into the context.
-// It configures the client using environment variables and applies any custom TLS settings from the context.
+// It configures the client using environment variables and applies any custom TLS settings from the context. If
+// GRAFANA_URL is unset (not configured yet), it injects a nil client rather than pointing at a local instance.
 var ExtractIncidentClientFromEnv server.StdioContextFunc = func(ctx context.Context) context.Context {
 	config := GrafanaConfigFromContext(ctx)
 	logger := config.LoggerOrDefault()
 	grafanaURL, apiKey := urlAndAPIKeyFromEnv(logger)
 	if grafanaURL == "" {
-		grafanaURL = defaultGrafanaURL
+		return context.WithValue(ctx, incidentClientKey{}, (*incident.Client)(nil))
 	}
 	incidentURL := fmt.Sprintf("%s/api/plugins/grafana-irm-app/resources/api/v1/", grafanaURL)
 	parsedURL, err := url.Parse(incidentURL)
@@ -1647,11 +1665,15 @@ var ExtractIncidentClientFromEnv server.StdioContextFunc = func(ctx context.Cont
 }
 
 // ExtractIncidentClientFromHeaders is a HTTPContextFunc that creates and injects a Grafana Incident client into the context.
-// It uses GRAFANA_URL with request-scoped authentication and organization headers and environment fallbacks.
+// It uses GRAFANA_URL with request-scoped authentication and organization headers and environment fallbacks. If no URL is
+// configured via either source (not configured yet), it injects a nil client rather than pointing at a local instance.
 var ExtractIncidentClientFromHeaders httpContextFunc = func(ctx context.Context, req *http.Request) context.Context {
 	config := GrafanaConfigFromContext(ctx)
 	logger := config.LoggerOrDefault()
 	grafanaURL, apiKey, _, orgID := extractKeyGrafanaInfoFromReq(req, logger)
+	if grafanaURL == "" {
+		return context.WithValue(ctx, incidentClientKey{}, (*incident.Client)(nil))
+	}
 	incidentURL := fmt.Sprintf("%s/api/plugins/grafana-irm-app/resources/api/v1/", grafanaURL)
 	client := incident.NewClient(incidentURL, apiKey)
 
@@ -1718,6 +1740,14 @@ func ComposeHTTPContextFuncs(funcs ...httpContextFunc) server.HTTPContextFunc {
 
 // ComposedStdioContextFunc returns a StdioContextFunc that comprises all predefined StdioContextFuncs.
 // It sets up the complete context for stdio transport including Grafana configuration, client initialization from environment variables, and incident management support.
+//
+// Note: for stdio, this runs exactly once when server.StdioServer.Listen starts
+// (there is only one client, and mcp-go bakes its context once for the whole
+// session) — so it can only ever reflect the startup GRAFANA_URL/token. A
+// later set_grafana_url call does not re-run this chain; instead,
+// RequireGrafanaURLMiddleware rebuilds the config/clients per tool call from
+// the session's runtime override, which is how set_grafana_url actually takes
+// effect for every transport including stdio.
 func ComposedStdioContextFunc(config GrafanaConfig) server.StdioContextFunc {
 	return ComposeStdioContextFuncs(
 		func(ctx context.Context) context.Context {
@@ -1733,6 +1763,10 @@ func ComposedStdioContextFunc(config GrafanaConfig) server.StdioContextFunc {
 // ComposedSSEContextFunc returns a SSEContextFunc that comprises all predefined SSEContextFuncs.
 // It sets up the complete context for SSE transport, extracting configuration from HTTP headers with environment variable fallbacks.
 // If cache is non-nil, clients are cached by credentials to avoid per-request transport allocation.
+//
+// This produces the startup/per-request env- or header-derived configuration
+// only. A session's set_grafana_url override is applied on top of this, per
+// tool call, by RequireGrafanaURLMiddleware.
 func ComposedSSEContextFunc(config GrafanaConfig, cache ...*ClientCache) server.SSEContextFunc {
 	grafanaExtractor, k8sExtractor, incidentExtractor := clientExtractors(cache)
 	return ComposeSSEContextFuncs(
@@ -1749,6 +1783,10 @@ func ComposedSSEContextFunc(config GrafanaConfig, cache ...*ClientCache) server.
 // ComposedHTTPContextFunc returns a HTTPContextFunc that comprises all predefined HTTPContextFuncs.
 // It provides the complete context setup for HTTP transport, including header-based authentication and client configuration.
 // If cache is non-nil, clients are cached by credentials to avoid per-request transport allocation.
+//
+// This produces the startup/per-request env- or header-derived configuration
+// only. A session's set_grafana_url override is applied on top of this, per
+// tool call, by RequireGrafanaURLMiddleware.
 func ComposedHTTPContextFunc(config GrafanaConfig, cache ...*ClientCache) server.HTTPContextFunc {
 	grafanaExtractor, k8sExtractor, incidentExtractor := clientExtractors(cache)
 	return ComposeHTTPContextFuncs(

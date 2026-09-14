@@ -45,8 +45,7 @@ func TestExtractIncidentClientFromHeaders(t *testing.T) {
 		ctx := ExtractIncidentClientFromHeaders(context.Background(), req)
 
 		client := IncidentClientFromContext(ctx)
-		require.NotNil(t, client)
-		assert.Equal(t, "http://localhost:3000/api/plugins/grafana-irm-app/resources/api/v1/", client.RemoteHost)
+		assert.Nil(t, client, "no Grafana URL is configured, so no incident client should be created")
 	})
 
 	t.Run("no headers, with env", func(t *testing.T) {
@@ -67,8 +66,7 @@ func TestExtractIncidentClientFromHeaders(t *testing.T) {
 		ctx := ExtractIncidentClientFromHeaders(context.Background(), req)
 
 		client := IncidentClientFromContext(ctx)
-		require.NotNil(t, client)
-		assert.Equal(t, "http://localhost:3000/api/plugins/grafana-irm-app/resources/api/v1/", client.RemoteHost)
+		assert.Nil(t, client, "the URL header is ignored and no env URL is set, so no incident client should be created")
 	})
 
 	t.Run("URL header ignored with env", func(t *testing.T) {
@@ -95,7 +93,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		require.NoError(t, err)
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "", config.APIKey)
 		assert.Nil(t, config.BasicAuth)
 	})
@@ -144,7 +142,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaAPIKeyHeader, "my-test-api-key")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-test-api-key", config.APIKey)
 	})
 
@@ -174,7 +172,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaServiceAccountTokenHeader, "my-service-account-token")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-service-account-token", config.APIKey)
 	})
 
@@ -190,7 +188,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaAPIKeyHeader, "my-deprecated-api-key")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-service-account-token", config.APIKey)
 	})
 
@@ -353,9 +351,7 @@ func TestExtractGrafanaClientFromHeaders(t *testing.T) {
 		require.NoError(t, err)
 		ctx := ExtractGrafanaClientFromHeaders(context.Background(), req)
 		c := GrafanaClientFromContext(ctx)
-		url := minURLFromClient(c)
-		assert.Equal(t, "localhost:3000", url.host)
-		assert.Equal(t, "/api", url.basePath)
+		assert.Nil(t, c, "no Grafana URL is configured, so no client should be created")
 	})
 
 	t.Run("no headers, with env", func(t *testing.T) {
@@ -376,9 +372,7 @@ func TestExtractGrafanaClientFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaURLHeader, "http://my-test-url.grafana.com")
 		ctx := ExtractGrafanaClientFromHeaders(context.Background(), req)
 		c := GrafanaClientFromContext(ctx)
-		url := minURLFromClient(c)
-		assert.Equal(t, "localhost:3000", url.host)
-		assert.Equal(t, "/api", url.basePath)
+		assert.Nil(t, c, "the URL header is ignored and no env URL is set, so no client should be created")
 	})
 
 	t.Run("URL header ignored with env", func(t *testing.T) {
@@ -2645,14 +2639,18 @@ func TestEnvURLSpellingsAgreeAcrossConsumers(t *testing.T) {
 	}
 }
 
-// An unset or blank GRAFANA_URL must still fall back to the documented default
-// rather than producing a client with no host.
-func TestBlankEnvURLFallsBackToDefault(t *testing.T) {
+// An unset or blank GRAFANA_URL must leave the server unconfigured (empty
+// URL, no default fallback) rather than silently pointing at a local
+// instance: the server should start successfully either way, and tools should
+// report "not configured" via RequireGrafanaURLMiddleware until GRAFANA_URL or
+// the set_grafana_url tool provides one.
+func TestBlankEnvURLStaysUnconfigured(t *testing.T) {
 	for _, raw := range []string{"", "   "} {
 		t.Run(strconv.Quote(raw), func(t *testing.T) {
 			t.Setenv("GRAFANA_URL", raw)
 			config := GrafanaConfigFromContext(ExtractGrafanaInfoFromEnv(context.Background()))
-			assert.Equal(t, defaultGrafanaURL, config.URL)
+			assert.Equal(t, "", config.URL)
+			assert.False(t, config.IsConfigured())
 		})
 	}
 }

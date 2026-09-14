@@ -32,8 +32,8 @@
       },
       "environmentVariables": [
         {
-          "description": "URL to your Grafana instance",
-          "isRequired": true,
+          "description": "URL to your Grafana instance. Optional at startup: if omitted, call the set_grafana_url tool at runtime to configure it (and change it later) without restarting the server.",
+          "isRequired": false,
           "format": "string",
           "isSecret": false,
           "name": "GRAFANA_URL"
