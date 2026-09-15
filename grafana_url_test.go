@@ -23,6 +23,21 @@ func newGrafanaURLTestServer(t *testing.T) (*SessionManager, *ToolManager, *serv
 	return sm, tm, srv
 }
 
+func TestSetGrafanaURLToolIsReadOnly(t *testing.T) {
+	sm, tm, _ := newGrafanaURLTestServer(t)
+	tool := NewSetGrafanaURLTool(sm, tm)
+
+	ann := tool.Tool.Annotations
+	require.NotNil(t, ann.ReadOnlyHint, "readOnlyHint must be set so clients do not treat this as a write tool")
+	assert.True(t, *ann.ReadOnlyHint)
+	require.NotNil(t, ann.DestructiveHint)
+	assert.False(t, *ann.DestructiveHint)
+	require.NotNil(t, ann.OpenWorldHint)
+	assert.False(t, *ann.OpenWorldHint)
+	require.NotNil(t, ann.IdempotentHint)
+	assert.True(t, *ann.IdempotentHint)
+}
+
 func TestSessionManagerGrafanaOverride(t *testing.T) {
 	t.Run("no override by default", func(t *testing.T) {
 		sm, _, _ := newGrafanaURLTestServer(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -59,6 +60,15 @@ func NewSetGrafanaURLTool(sm *SessionManager, tm *ToolManager) Tool {
 		func(ctx context.Context, args SetGrafanaURLParams) (SetGrafanaURLResult, error) {
 			return handleSetGrafanaURL(ctx, sm, tm, args)
 		},
+		mcp.WithTitleAnnotation("Set Grafana URL"),
+		mcp.WithIdempotentHintAnnotation(true),
+		// Read-only from Grafana's point of view: this only updates the MCP
+		// session's connection target, so clients that hide write tools (and
+		// --disable-write) still expose it. Without an explicit true hint the
+		// MCP default is false, which those clients treat as a write.
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(false),
 	).NotOrgScoped()
 }
 
