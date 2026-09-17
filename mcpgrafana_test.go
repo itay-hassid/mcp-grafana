@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-openapi/runtime/client"
 	grafana_client "github.com/grafana/grafana-openapi-client-go/client"
@@ -45,8 +46,7 @@ func TestExtractIncidentClientFromHeaders(t *testing.T) {
 		ctx := ExtractIncidentClientFromHeaders(context.Background(), req)
 
 		client := IncidentClientFromContext(ctx)
-		require.NotNil(t, client)
-		assert.Equal(t, "http://localhost:3000/api/plugins/grafana-irm-app/resources/api/v1/", client.RemoteHost)
+		assert.Nil(t, client, "no Grafana URL is configured, so no incident client should be created")
 	})
 
 	t.Run("no headers, with env", func(t *testing.T) {
@@ -67,8 +67,7 @@ func TestExtractIncidentClientFromHeaders(t *testing.T) {
 		ctx := ExtractIncidentClientFromHeaders(context.Background(), req)
 
 		client := IncidentClientFromContext(ctx)
-		require.NotNil(t, client)
-		assert.Equal(t, "http://localhost:3000/api/plugins/grafana-irm-app/resources/api/v1/", client.RemoteHost)
+		assert.Nil(t, client, "the URL header is ignored and no env URL is set, so no incident client should be created")
 	})
 
 	t.Run("URL header ignored with env", func(t *testing.T) {
@@ -95,7 +94,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		require.NoError(t, err)
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "", config.APIKey)
 		assert.Nil(t, config.BasicAuth)
 	})
@@ -144,7 +143,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaAPIKeyHeader, "my-test-api-key")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-test-api-key", config.APIKey)
 	})
 
@@ -174,7 +173,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaServiceAccountTokenHeader, "my-service-account-token")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-service-account-token", config.APIKey)
 	})
 
@@ -190,7 +189,7 @@ func TestExtractGrafanaInfoFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaAPIKeyHeader, "my-deprecated-api-key")
 		ctx := ExtractGrafanaInfoFromHeaders(context.Background(), req)
 		config := GrafanaConfigFromContext(ctx)
-		assert.Equal(t, defaultGrafanaURL, config.URL)
+		assert.Equal(t, "", config.URL)
 		assert.Equal(t, "my-service-account-token", config.APIKey)
 	})
 
@@ -353,9 +352,7 @@ func TestExtractGrafanaClientFromHeaders(t *testing.T) {
 		require.NoError(t, err)
 		ctx := ExtractGrafanaClientFromHeaders(context.Background(), req)
 		c := GrafanaClientFromContext(ctx)
-		url := minURLFromClient(c)
-		assert.Equal(t, "localhost:3000", url.host)
-		assert.Equal(t, "/api", url.basePath)
+		assert.Nil(t, c, "no Grafana URL is configured, so no client should be created")
 	})
 
 	t.Run("no headers, with env", func(t *testing.T) {
@@ -376,9 +373,7 @@ func TestExtractGrafanaClientFromHeaders(t *testing.T) {
 		req.Header.Set(grafanaURLHeader, "http://my-test-url.grafana.com")
 		ctx := ExtractGrafanaClientFromHeaders(context.Background(), req)
 		c := GrafanaClientFromContext(ctx)
-		url := minURLFromClient(c)
-		assert.Equal(t, "localhost:3000", url.host)
-		assert.Equal(t, "/api", url.basePath)
+		assert.Nil(t, c, "the URL header is ignored and no env URL is set, so no client should be created")
 	})
 
 	t.Run("URL header ignored with env", func(t *testing.T) {
@@ -2234,6 +2229,95 @@ func TestFrontendSettingsCachesOnlySuccesses(t *testing.T) {
 	})
 }
 
+// TestFrontendSettingsTimeoutSelection is a fast, non-network unit test for
+// frontendSettingsTimeout's fallback logic, isolated from the slower
+// delayed-server tests below so the zero/default-vs-hardcoded distinction
+// doesn't require an actual multi-second wait to verify.
+func TestFrontendSettingsTimeoutSelection(t *testing.T) {
+	t.Run("uses cfg.Timeout when set", func(t *testing.T) {
+		got := frontendSettingsTimeout(&GrafanaConfig{Timeout: 3 * time.Second})
+		assert.Equal(t, 3*time.Second, got)
+	})
+
+	t.Run("falls back to DefaultGrafanaClientTimeout when unset, not a shorter hardcoded value", func(t *testing.T) {
+		got := frontendSettingsTimeout(&GrafanaConfig{})
+		assert.Equal(t, DefaultGrafanaClientTimeout, got)
+		assert.Greater(t, got, 5*time.Second,
+			"regression guard: this must not silently be the old hardcoded 5s policy")
+	})
+}
+
+// TestFrontendSettingsTimeout is a regression test for the frontend-settings
+// fetch previously hardcoding a 5-second deadline in both loadFrontendSettings
+// (the singleflight's detached fetch context) and doFetchFrontendSettings (the
+// http.Client itself), independent of GrafanaConfig.Timeout. A destination
+// whose connection setup (e.g. DNS resolution for a short/internal hostname)
+// took longer than 5s but well within a configured or default timeout would
+// fail this request even though the rest of the client would have happily
+// waited for it.
+func TestFrontendSettingsTimeout(t *testing.T) {
+	t.Cleanup(clearFrontendSettingsCaches)
+
+	// delayedFrontendSettingsServer returns a server whose /api/frontend/settings
+	// response is held for `delay` before responding, standing in for a slow
+	// destination (e.g. slow DNS or a loaded backend) rather than a slow
+	// handler specifically.
+	delayedFrontendSettingsServer := func(t *testing.T, delay time.Duration) *httptest.Server {
+		t.Helper()
+		return newTestHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"appUrl": "https://grafana.example.com", "buildInfo": {"version": "12.1.0"}}`))
+		})
+	}
+
+	t.Run("a custom timeout shorter than the response delay fails fast", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 200*time.Millisecond)
+
+		cfg := GrafanaConfig{URL: ts.URL, Timeout: 50 * time.Millisecond}
+		start := time.Now()
+		_, err := doFetchFrontendSettings(context.Background(), &cfg)
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		assert.Less(t, elapsed, 200*time.Millisecond,
+			"the configured 50ms timeout must cut the request off well before the server's 200ms delay elapses")
+	})
+
+	t.Run("loadFrontendSettings' singleflight fetch context honors the same short custom timeout", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 200*time.Millisecond)
+
+		cfg := GrafanaConfig{URL: ts.URL, Timeout: 50 * time.Millisecond}
+		start := time.Now()
+		_, err := loadFrontendSettings(&cfg)
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		assert.Less(t, elapsed, 200*time.Millisecond,
+			"loadFrontendSettings must apply the same short timeout to its detached fetch context, not just doFetchFrontendSettings' own http.Client")
+	})
+
+	// This is the exact dm-4 scenario: a destination whose connection setup
+	// (there, DNS resolution) took longer than the old hardcoded 5s ceiling
+	// but comfortably under the configured/default timeout. It must succeed
+	// end-to-end through NewGrafanaClient, the entry point set_grafana_url and
+	// startup both use, with Timeout left unset so this also exercises the
+	// DefaultGrafanaClientTimeout fallback (not just an explicit long Timeout).
+	t.Run("NewGrafanaClient succeeds past the old hardcoded 5s ceiling using the 10s default", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 6*time.Second)
+
+		ctx := WithGrafanaConfig(context.Background(), GrafanaConfig{}) // Timeout left zero.
+		c := NewGrafanaClient(ctx, ts.URL, "test-key", nil)
+
+		require.NotNil(t, c)
+		assert.Equal(t, "12.1.0", c.Version,
+			"a >5s but <10s response must succeed now that the default timeout is honored end-to-end")
+	})
+}
+
 func TestOrgIDRoundTripperContextOverride(t *testing.T) {
 	t.Run("context OrgID overrides captured value", func(t *testing.T) {
 		var capturedReq *http.Request
@@ -2645,14 +2729,18 @@ func TestEnvURLSpellingsAgreeAcrossConsumers(t *testing.T) {
 	}
 }
 
-// An unset or blank GRAFANA_URL must still fall back to the documented default
-// rather than producing a client with no host.
-func TestBlankEnvURLFallsBackToDefault(t *testing.T) {
+// An unset or blank GRAFANA_URL must leave the server unconfigured (empty
+// URL, no default fallback) rather than silently pointing at a local
+// instance: the server should start successfully either way, and tools should
+// report "not configured" via RequireGrafanaURLMiddleware until GRAFANA_URL or
+// the set_grafana_url tool provides one.
+func TestBlankEnvURLStaysUnconfigured(t *testing.T) {
 	for _, raw := range []string{"", "   "} {
 		t.Run(strconv.Quote(raw), func(t *testing.T) {
 			t.Setenv("GRAFANA_URL", raw)
 			config := GrafanaConfigFromContext(ExtractGrafanaInfoFromEnv(context.Background()))
-			assert.Equal(t, defaultGrafanaURL, config.URL)
+			assert.Equal(t, "", config.URL)
+			assert.False(t, config.IsConfigured())
 		})
 	}
 }

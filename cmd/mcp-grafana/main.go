@@ -989,6 +989,17 @@ func run(transport, addr, basePath, endpointPath string, logLevel slog.Level, dt
 	s, tm, sm := newServer(obs.ServerName, transport, dt, o, sessionIdleTimeoutMinutes, instructionsAppend)
 	defer sm.Close()
 
+	// set_grafana_url lets a caller configure (or change) the Grafana instance
+	// a session talks to at runtime, so GRAFANA_URL can be left unset at
+	// startup. It is registered unconditionally (not behind a disabled-tools
+	// flag) since without it there would be no way to configure an
+	// unconfigured server. RequireGrafanaURLMiddleware is the other half: it
+	// applies each session's override (if any) and blocks every other native
+	// tool with a clear error until a Grafana URL is configured.
+	setGrafanaURLTool := mcpgrafana.NewSetGrafanaURLTool(sm, tm)
+	setGrafanaURLTool.Register(s)
+	s.Use(mcpgrafana.RequireGrafanaURLMiddleware(sm, clientCache))
+
 	// Create a context that will be cancelled on shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

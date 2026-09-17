@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `check_datasources_health` no longer reports a frontend-only datasource plugin (e.g. the built-in Alertmanager datasource) as unhealthy: those plugins have no backend to serve the health endpoint, so it always failed for them. Such datasources now report `"status": "UNKNOWN"` and are counted separately in a new `unknown` field on the bulk result, rather than inflating `unhealthy` ([#1069](https://github.com/grafana/mcp-grafana/issues/1069))
 
+## [1.3.2] - 2026-09-17
+
+### Fixed
+
+- `set_grafana_url` no longer reports success while silently failing to persist its session override: the calling session is now registered before the override is stored, and the stored value is read back and confirmed before the tool returns, so a failure to persist (e.g. a session torn down mid-call) surfaces as an error instead of a misleading "configured" result immediately followed by "Grafana URL is not configured" on the next tool call.
+- Fetching Grafana's `/api/frontend/settings` (used to resolve the public URL, version, and namespace for every native tool, including right after `set_grafana_url`) no longer applies a hardcoded 5-second timeout independent of the configured connection timeout. It now honors `GrafanaConfig.Timeout` (falling back to the 10-second `DefaultGrafanaClientTimeout`), so instances whose connection setup — e.g. DNS resolution for a short/internal hostname — takes longer than 5s but less than the configured/default timeout no longer fail with `context deadline exceeded`.
+
 ## [1.3.0] - 2026-08-28
 
 ### Added
@@ -438,6 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Upgrade Docker base image packages to resolve critical OpenSSL CVE-2025-15467 (CVSS 9.8) ([#551](https://github.com/grafana/mcp-grafana/pull/551))
 
+[1.3.2]: https://github.com/itay-hassid/mcp-grafana/compare/v1.3.1...v1.3.2
 [1.3.0]: https://github.com/grafana/mcp-grafana/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/grafana/mcp-grafana/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/grafana/mcp-grafana/compare/v1.0.0...v1.1.0

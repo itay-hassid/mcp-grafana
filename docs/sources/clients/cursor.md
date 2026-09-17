@@ -18,8 +18,10 @@ This guide helps you set up the `mcp-grafana` server for Cursor.
 ## Prerequisites
 
 - Cursor IDE installed
-- Grafana 9.0+ with a service account token
+- Grafana 9.0+ (a service account token is recommended, but not required)
 - `mcp-grafana` binary in your PATH
+
+`GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` are optional: the server starts without them, and you can configure (or change) the Grafana connection at runtime by asking the agent to call the `set_grafana_url` tool with a `url` (and optional `token`). See [Configure authentication](../../configure/authentication/#configure-at-runtime) for details. The examples below set them via environment variables for convenience.
 
 ## Configuration
 

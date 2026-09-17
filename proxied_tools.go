@@ -764,7 +764,9 @@ func (tm *ToolManager) loggerFromCtx(ctx context.Context) *slog.Logger {
 }
 
 // InitializeAndRegisterServerTools discovers datasources and registers tools on the server (for stdio transport)
-// This should be called once at server startup for single-tenant stdio servers
+// This should be called once at server startup for single-tenant stdio servers,
+// and again (via ResetServerProxiedTools) after a set_grafana_url call changes
+// the stdio connection's Grafana instance.
 func (tm *ToolManager) InitializeAndRegisterServerTools(ctx context.Context) error {
 	if !tm.enableProxiedTools {
 		return nil
@@ -774,6 +776,13 @@ func (tm *ToolManager) InitializeAndRegisterServerTools(ctx context.Context) err
 	tm.serverMode = true
 
 	logger := tm.loggerFromCtx(ctx)
+
+	if !GrafanaConfigFromContext(ctx).IsConfigured() {
+		// Not an error: GRAFANA_URL is optional at startup, and set_grafana_url
+		// (via ResetServerProxiedTools) re-runs this once it is configured.
+		logger.InfoContext(ctx, "Grafana URL is not configured; skipping proxied tool discovery until set_grafana_url is called")
+		return nil
+	}
 
 	// Discover datasources with MCP support
 	discovered, _, connectionOrg, err := discoverMCPDatasources(ctx, logger, tm.metrics)
@@ -830,6 +839,40 @@ func (tm *ToolManager) InitializeAndRegisterServerTools(ctx context.Context) err
 
 	logger.InfoContext(ctx, "registered proxied tools on server", "tools", len(toolMap))
 	return nil
+}
+
+// ResetServerProxiedTools re-runs server-wide (stdio) proxied tool discovery
+// under ctx's GrafanaConfig/GrafanaClient, following a set_grafana_url call.
+// It deletes the previously-registered server tools and closes the previous
+// proxied clients before rediscovering, so a datasource removed (or made
+// unreachable) by the URL change does not leave a stale tool registered.
+//
+// ctx must already carry the new GrafanaConfig and a GrafanaClient built from
+// it: stdio has no per-call context chain to derive them from (see
+// ComposedStdioContextFunc's doc comment), so the set_grafana_url handler
+// builds them itself before calling this.
+func (tm *ToolManager) ResetServerProxiedTools(ctx context.Context) error {
+	if !tm.enableProxiedTools {
+		return nil
+	}
+
+	tm.clientsMutex.Lock()
+	staleClients := tm.serverClients
+	tm.serverClients = make(map[string]*ProxiedClient)
+	tm.clientsMutex.Unlock()
+
+	var staleToolNames []string
+	for _, client := range staleClients {
+		for _, tool := range client.ListTools() {
+			staleToolNames = append(staleToolNames, client.DatasourceType+"_"+tool.Name)
+		}
+	}
+	if len(staleToolNames) > 0 {
+		tm.server.DeleteTools(staleToolNames...)
+	}
+	tm.closeProxiedClients(staleClients)
+
+	return tm.InitializeAndRegisterServerTools(ctx)
 }
 
 // buildStats summarizes how a build's candidate datasources fared, for the
@@ -1261,7 +1304,20 @@ func (tm *ToolManager) InitializeAndRegisterProxiedTools(ctx context.Context, se
 		return
 	}
 
+	// Apply the session's set_grafana_url override (if any) before computing
+	// the credential-keyed set: OnBeforeListTools/OnBeforeCallTool run before
+	// RequireGrafanaURLMiddleware (which applies the same override for regular
+	// tool calls), so without this, discovery would keep using the
+	// connection's original env/header-derived Grafana instance forever.
+	ctx = applySessionGrafanaOverride(ctx, tm.sm, nil)
+
 	logger := tm.loggerFromCtx(ctx)
+
+	if !GrafanaConfigFromContext(ctx).IsConfigured() {
+		// Not an error: GRAFANA_URL is optional at startup, and a session that
+		// later calls set_grafana_url retries this on its next hook invocation.
+		return
+	}
 
 	sessionID := session.SessionID()
 	state, exists := tm.sm.GetSession(sessionID)
@@ -1425,6 +1481,52 @@ func (tm *ToolManager) releaseSessionProxiedToolSet(state *SessionState) {
 	state.mutex.Unlock()
 
 	tm.releaseProxiedToolSet(set)
+}
+
+// ResetProxiedToolsForSession forces the given session's proxied tool set
+// (datasource MCP servers reached through Grafana, e.g. Tempo) to be
+// re-discovered under the session's new Grafana connection, following a
+// set_grafana_url call. It releases the session's reference to its current
+// proxied tool set (if any), removes that set's tools from the session, and
+// clears state.proxiedRegistered so the next OnBeforeListTools/OnBeforeCallTool
+// hook re-attaches — under a new proxiedToolSetKey, since the URL/token
+// changed — triggering a fresh discovery against the new Grafana instance.
+//
+// This is a no-op if proxied tools are disabled or the session is untracked
+// (e.g. stdio, which uses ResetServerProxiedTools instead).
+func (tm *ToolManager) ResetProxiedToolsForSession(sessionID string) {
+	if !tm.enableProxiedTools {
+		return
+	}
+	state, exists := tm.sm.GetSession(sessionID)
+	if !exists {
+		return
+	}
+
+	state.proxiedInitMu.Lock()
+	defer state.proxiedInitMu.Unlock()
+
+	state.mutex.RLock()
+	set := state.proxiedSet
+	state.mutex.RUnlock()
+
+	var staleToolNames []string
+	if set != nil {
+		tm.proxiedSetsMu.Lock()
+		for _, t := range set.tools {
+			staleToolNames = append(staleToolNames, t.Name)
+		}
+		tm.proxiedSetsMu.Unlock()
+	}
+
+	tm.releaseSessionProxiedToolSet(state)
+	state.proxiedRegistered = false
+
+	if len(staleToolNames) > 0 {
+		if err := tm.server.DeleteSessionTools(sessionID, staleToolNames...); err != nil {
+			tm.logger.Warn("failed to delete stale proxied session tools after set_grafana_url", "session", sessionID, "error", err)
+		}
+	}
 }
 
 // GetServerClient retrieves a proxied client from server-level storage (for stdio transport)

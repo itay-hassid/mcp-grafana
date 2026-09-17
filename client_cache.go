@@ -354,6 +354,12 @@ func hashAPIKey(key string) string {
 }
 
 // extractGrafanaClientCached creates an httpContextFunc that uses the cache.
+// It builds the cache key and client from the GrafanaConfig already resolved
+// in the context (by ExtractGrafanaInfoFromHeaders, and any session-level
+// runtime override applied afterwards) rather than re-reading the request
+// itself, so a Grafana URL/token set at runtime via the set_grafana_url tool
+// takes effect here too: a different session override produces a different
+// cache key, and therefore a fresh Grafana HTTP client.
 func extractGrafanaClientCached(cache *ClientCache) httpContextFunc {
 	return func(ctx context.Context, req *http.Request) context.Context {
 		config := GrafanaConfigFromContext(ctx)
@@ -362,12 +368,11 @@ func extractGrafanaClientCached(cache *ClientCache) httpContextFunc {
 			logger.Warn("No org ID found in request headers or environment variables, using default org. Set GRAFANA_ORG_ID or pass X-Grafana-Org-Id header to target a specific org.")
 		}
 
-		u, apiKey, basicAuth, _ := extractKeyGrafanaInfoFromReq(req, logger)
-		key := cacheKeyFromRequest(u, apiKey, basicAuth, config.OrgID, req)
+		key := cacheKeyFromRequest(config.URL, config.APIKey, config.BasicAuth, config.OrgID, req)
 
 		grafanaClient := cache.GetOrCreateGrafanaClient(key, func() *GrafanaClient {
-			logger.Debug("Creating new Grafana client (cache miss)", "url", u, "api_key_hash", hashAPIKey(apiKey))
-			return NewGrafanaClient(ctx, u, apiKey, basicAuth)
+			logger.Debug("Creating new Grafana client (cache miss)", "url", config.URL, "api_key_hash", hashAPIKey(config.APIKey))
+			return NewGrafanaClient(ctx, config.URL, config.APIKey, config.BasicAuth)
 		})
 
 		return WithGrafanaClient(ctx, grafanaClient)
@@ -375,20 +380,26 @@ func extractGrafanaClientCached(cache *ClientCache) httpContextFunc {
 }
 
 // extractIncidentClientCached creates an httpContextFunc that uses the cache.
+// It builds the cache key and client from the GrafanaConfig already resolved
+// in the context, same as extractGrafanaClientCached above. When config.URL is
+// empty (not configured yet), it caches a nil client for that key rather than
+// pointing at a local instance.
 func extractIncidentClientCached(cache *ClientCache) httpContextFunc {
 	return func(ctx context.Context, req *http.Request) context.Context {
 		config := GrafanaConfigFromContext(ctx)
 		logger := config.LoggerOrDefault()
 
-		grafanaURL, apiKey, _, orgID := extractKeyGrafanaInfoFromReq(req, logger)
-		key := cacheKeyFromRequest(grafanaURL, apiKey, nil, orgID, req)
+		key := cacheKeyFromRequest(config.URL, config.APIKey, nil, config.OrgID, req)
 
 		incidentClient := cache.GetOrCreateIncidentClient(key, func() *incident.Client {
-			incidentURL := fmt.Sprintf("%s/api/plugins/grafana-irm-app/resources/api/v1/", grafanaURL)
-			logger.Debug("Creating new incident client (cache miss)", "url", incidentURL)
-			client := incident.NewClient(incidentURL, apiKey)
+			if !config.IsConfigured() {
+				return nil
+			}
 
-			config.OrgID = orgID
+			incidentURL := fmt.Sprintf("%s/api/plugins/grafana-irm-app/resources/api/v1/", config.URL)
+			logger.Debug("Creating new incident client (cache miss)", "url", incidentURL)
+			client := incident.NewClient(incidentURL, config.APIKey)
+
 			transport, err := BuildTransport(&config, nil, WithoutAuth())
 			switch {
 			case err == nil:
@@ -409,16 +420,17 @@ func extractIncidentClientCached(cache *ClientCache) httpContextFunc {
 }
 
 // extractKubernetesClientCached creates an httpContextFunc that uses the cache.
+// It builds the cache key from the GrafanaConfig already resolved in the
+// context, same as extractGrafanaClientCached above.
 func extractKubernetesClientCached(cache *ClientCache) httpContextFunc {
 	return func(ctx context.Context, req *http.Request) context.Context {
 		config := GrafanaConfigFromContext(ctx)
 		logger := config.LoggerOrDefault()
 
-		u, apiKey, basicAuth, _ := extractKeyGrafanaInfoFromReq(req, logger)
-		key := cacheKeyFromRequest(u, apiKey, basicAuth, config.OrgID, req)
+		key := cacheKeyFromRequest(config.URL, config.APIKey, config.BasicAuth, config.OrgID, req)
 
 		k8sClient := cache.GetOrCreateK8sClient(key, func() *KubernetesClient {
-			logger.Debug("Creating new Kubernetes client (cache miss)", "url", u, "api_key_hash", hashAPIKey(apiKey))
+			logger.Debug("Creating new Kubernetes client (cache miss)", "url", config.URL, "api_key_hash", hashAPIKey(config.APIKey))
 			client, err := NewKubernetesClient(ctx)
 			if err != nil {
 				logger.Warn("Failed to create Kubernetes client; k8s APIs will be unavailable for this request", "error", err)

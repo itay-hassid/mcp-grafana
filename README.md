@@ -31,6 +31,8 @@ Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). Add the 
 
 For Grafana Cloud, replace `GRAFANA_URL` with your instance URL (e.g. `https://myinstance.grafana.net`). See [Usage](#usage) for more installation options including Docker, binary, and Helm.
 
+`GRAFANA_URL` and `GRAFANA_SERVICE_ACCOUNT_TOKEN` are optional at startup — the server runs without them, and every Grafana-dependent tool returns a clear error until a URL is configured. Skip them and instead ask the agent to call the `set_grafana_url` tool with a `url` (and optional `token`) to configure, or later change, the Grafana connection at runtime. See [Authentication](docs/sources/configure/authentication.md#configure-at-runtime) for details.
+
 ## Requirements
 
 - **Grafana version 9.0 or later** is required for full functionality. Some features, particularly datasource-related operations, may not work correctly with earlier versions due to missing API endpoints.
@@ -38,6 +40,10 @@ For Grafana Cloud, replace `GRAFANA_URL` with your instance URL (e.g. `https://m
 ## Features
 
 _The following features are currently available in MCP server. This list is for informational purposes only and does not represent a roadmap or commitment to future features._
+
+### Connection
+
+- **Set Grafana URL:** Configure (or change) the Grafana instance the current MCP session connects to at runtime, with an optional auth token — no server restart required. See [Authentication](docs/sources/configure/authentication.md#configure-at-runtime) for details.
 
 ### Dashboards
 
@@ -301,6 +307,7 @@ Scopes define the specific resources that permissions apply to. Each action requ
 
 | Tool                              | Category                  | Description                                                                                                  | Required RBAC Permissions                              | Required Scopes                                     |
 | --------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ | --------------------------------------------------- |
+| `set_grafana_url`                 | Connection                | Configure (or change) the Grafana URL and token this session connects to, at runtime                        | N/A                                                     | N/A                                                 |
 | `list_teams`                      | Admin                     | List all teams                                                                                               | `teams:read`                                           | `teams:*` or `teams:id:1`                           |
 | `list_users_by_org`               | Admin                     | List all users in an organization                                                                            | `users:read`                                           | `global.users:*` or `global.users:id:123`           |
 | `list_all_roles`                  | Admin                     | List all Grafana roles                                                                                       | `roles:read`                                           | `roles:*`                                           |

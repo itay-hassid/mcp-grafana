@@ -14,7 +14,9 @@ aliases:
 
 # Authentication
 
-The Grafana MCP server needs credentials to call the Grafana API. Use a service account token (recommended) or a username and password.
+The Grafana MCP server needs a URL (and usually credentials) to call the Grafana API. Use a service account token (recommended) or a username and password.
+
+`GRAFANA_URL` and its credentials are optional at startup: the server starts successfully without them, and every tool that needs Grafana returns a clear error until a URL is configured. Set them via environment variables up front, or call the `set_grafana_url` tool at runtime — see [Configure at runtime](#configure-at-runtime) below.
 
 ## What you'll achieve
 
@@ -59,6 +61,23 @@ Surrounding whitespace (including a trailing newline) is trimmed from the file c
 ## Use username and password
 
 You can use basic auth by setting `GRAFANA_USERNAME` and `GRAFANA_PASSWORD` instead of a token. This is less suitable for automation; prefer a service account token when possible.
+
+## Configure at runtime
+
+If `GRAFANA_URL` is not set (or you want to point the server at a different instance), call the `set_grafana_url` tool from your MCP client:
+
+- **url** (required): the Grafana base URL, for example `https://myinstance.grafana.net`. A bare `host[:port]` like `localhost:3000` is also accepted and normalized to `http://localhost:3000`.
+- **token** (optional): a service account token (or the deprecated API key) to authenticate with. Omit it to make unauthenticated requests against the new URL.
+
+`set_grafana_url` applies only to the calling MCP session — for SSE/streamable-http deployments with multiple concurrent clients, one session's call never affects another session's connection or credentials. For stdio, where there is only ever one client for the life of the process, this is equivalent to a process-wide change.
+
+Until a URL is configured (via `GRAFANA_URL`/`GRAFANA_SERVICE_ACCOUNT_TOKEN` or `set_grafana_url`), every Grafana-dependent tool returns:
+
+```text
+Grafana URL is not configured. Please call the `set_grafana_url` tool first.
+```
+
+A small set of tools that don't need a Grafana connection (for example, docs search) remain usable even when unconfigured.
 
 ## Next steps
 

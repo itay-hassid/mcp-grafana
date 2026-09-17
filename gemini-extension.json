@@ -9,15 +9,15 @@
   "settings": [
     {
       "name": "Grafana URL",
-      "description": "The base URL of your Grafana instance (e.g., https://grafana.example.com)",
+      "description": "The base URL of your Grafana instance (e.g., https://grafana.example.com). Optional: if left empty, call the set_grafana_url tool at runtime to configure it (and change it later) without restarting the server.",
       "envVar": "GRAFANA_URL",
-      "required": true
+      "required": false
     },
     {
       "name": "Service Account Token",
-      "description": "Your Grafana Service Account Token (glsa_...)",
+      "description": "Your Grafana Service Account Token (glsa_...). Optional; can also be supplied at runtime via the set_grafana_url tool's token argument.",
       "envVar": "GRAFANA_SERVICE_ACCOUNT_TOKEN",
-      "required": true,
+      "required": false,
       "sensitive": true
     },
     {

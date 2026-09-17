@@ -236,12 +236,12 @@ func TestExtractGrafanaClientFromHeaders_IgnoresURLHeader(t *testing.T) {
 }
 
 func TestExtractGrafanaClientFromHeaders_NoHeader(t *testing.T) {
-	// No X-Grafana-URL header: extractor falls back to env, and env is empty
-	// so defaultGrafanaURL (http://localhost:3000) applies. Nothing is
-	// listening on :3000 during tests, so the client call MUST fail with a
-	// connection-level error (proving defaultGrafanaURL was used) and MUST
-	// NOT fail with a URL-parse error (which would mean the extractor
-	// produced garbage).
+	// No X-Grafana-URL header and no env URL: the server is meant to start
+	// successfully unconfigured (GRAFANA_URL is optional), so the extractor
+	// must attach a nil client rather than defaulting to a local instance.
+	// Callers reach RequireGrafanaURLMiddleware's guard (or check
+	// GrafanaConfigFromContext(ctx).IsConfigured() themselves) before ever
+	// dereferencing this.
 	t.Setenv("GRAFANA_URL", "")
 	t.Setenv("GRAFANA_SERVICE_ACCOUNT_TOKEN", "")
 
@@ -250,11 +250,5 @@ func TestExtractGrafanaClientFromHeaders_NoHeader(t *testing.T) {
 
 	ctx := ExtractGrafanaClientFromHeaders(context.Background(), req)
 	c := GrafanaClientFromContext(ctx)
-	require.NotNil(t, c, "extractor must attach a client even with no header")
-
-	_, apiErr := c.Dashboards.GetDashboardByUID("any-uid")
-	require.Error(t, apiErr,
-		"no-header path should fall back to defaultGrafanaURL and fail to connect")
-	assert.NotContains(t, apiErr.Error(), "parse",
-		"failure must be connection-level, not a URL-parse error; got %v", apiErr)
+	assert.Nil(t, c, "no Grafana URL is configured, so no client should be created")
 }
