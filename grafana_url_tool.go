@@ -79,6 +79,18 @@ func NewSetGrafanaURLTool(sm *SessionManager, tm *ToolManager) Tool {
 // Grafana tools need no such refresh: RequireGrafanaURLMiddleware rebuilds
 // their config/clients from the override on every call, so they see the new
 // instance starting with the very next tool call.
+//
+// The session is explicitly registered with sm before the override is stored
+// (mirroring the defensive registration InitializeAndRegisterProxiedTools
+// already does for proxied-tool discovery), rather than assuming
+// OnRegisterSession already ran for it. SessionManager.SetGrafanaOverride is a
+// no-op against an untracked session, and without this call this handler
+// could report success while the override silently failed to persist,
+// leaving every subsequent tool call unable to see it. The override is read
+// back and its persistence confirmed before returning success, so a
+// still-failing store (e.g. a teardown racing this call) surfaces as an error
+// here rather than as a confusing "configured" result immediately followed by
+// "Grafana URL is not configured" on the next tool call.
 func handleSetGrafanaURL(ctx context.Context, sm *SessionManager, tm *ToolManager, args SetGrafanaURLParams) (SetGrafanaURLResult, error) {
 	normalized := normalizeGrafanaURL(args.URL)
 	if err := ValidateGrafanaURL(normalized); err != nil {
@@ -98,7 +110,28 @@ func handleSetGrafanaURL(ctx context.Context, sm *SessionManager, tm *ToolManage
 		return SetGrafanaURLResult{}, fmt.Errorf("session management is not available; this server was not constructed with a SessionManager")
 	}
 	sessionID := session.SessionID()
-	sm.SetGrafanaOverride(sessionID, GrafanaOverride{URL: normalized, Token: token})
+
+	// Ensure the session is tracked before storing the override: for stdio,
+	// OnRegisterSession normally runs this at Listen startup, but embedders or
+	// unusual hook wiring could reach this handler for a session sm has never
+	// seen. CreateSession is idempotent (a no-op if already tracked), so this
+	// is safe to call unconditionally.
+	sm.CreateSession(ctx, session)
+
+	if !sm.SetGrafanaOverride(sessionID, GrafanaOverride{URL: normalized, Token: token}) {
+		return SetGrafanaURLResult{}, fmt.Errorf("failed to store Grafana URL override for this session: session %q is not tracked (it may have just been torn down); retry the call", sessionID)
+	}
+
+	// Confirm the override is actually readable back for this session before
+	// reporting success: SetGrafanaOverride returning true only means the
+	// session was tracked at the moment of the write, not that a concurrent
+	// teardown didn't remove it immediately after (e.g. an idle reaper sweep
+	// racing this call). Reading it back closes that window rather than
+	// letting the caller believe the URL is active when it is not.
+	stored, ok := sm.GrafanaOverrideForSession(sessionID)
+	if !ok || stored.URL != normalized {
+		return SetGrafanaURLResult{}, fmt.Errorf("Grafana URL override did not persist for session %q; retry the call", sessionID)
+	}
 
 	if tm != nil {
 		refreshProxiedToolsAfterOverride(ctx, tm, sessionID, normalized, token)

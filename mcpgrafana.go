@@ -1122,8 +1122,14 @@ func loadFrontendSettings(cfg *GrafanaConfig) (frontendSettings, error) {
 
 		// Detached context with timeout so a cancelled caller doesn't fail the
 		// fetch for all waiters; re-inject the GrafanaConfig so the request
-		// carries the right auth and Org-ID header.
-		fetchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// carries the right auth and Org-ID header. Use the same timeout
+		// policy as the main Grafana client (cfg.Timeout, falling back to
+		// DefaultGrafanaClientTimeout) rather than a separate hardcoded value:
+		// a short fixed timeout here previously lost the race against slow
+		// DNS resolution for operator-configured short/internal hostnames
+		// (e.g. Tailscale MagicDNS names), even though the same hostname
+		// resolves fine within the main client's longer budget.
+		fetchCtx, cancel := context.WithTimeout(context.Background(), frontendSettingsTimeout(cfg))
 		defer cancel()
 		fetchCtx = WithGrafanaConfig(fetchCtx, *cfg)
 
@@ -1186,6 +1192,20 @@ type frontendSettings struct {
 	Version string
 }
 
+// frontendSettingsTimeout returns the timeout to use for an
+// /api/frontend/settings request against cfg's instance: cfg.Timeout if the
+// caller (or --grafana-timeout / GRAFANA_TIMEOUT) set one, otherwise
+// DefaultGrafanaClientTimeout. This mirrors the policy tools/datasources.go
+// and tools/datasources_fallback.go already use for their own frontend-
+// settings requests, so all consumers of this endpoint honor the same
+// operator-configured timeout instead of each hardcoding their own value.
+func frontendSettingsTimeout(cfg *GrafanaConfig) time.Duration {
+	if cfg.Timeout > 0 {
+		return cfg.Timeout
+	}
+	return DefaultGrafanaClientTimeout
+}
+
 // doFetchFrontendSettings performs the actual HTTP request to fetch the
 // Grafana frontend settings, returning the fields the MCP server uses.
 //
@@ -1211,7 +1231,7 @@ func doFetchFrontendSettings(ctx context.Context, cfg *GrafanaConfig) (frontendS
 	}
 
 	httpClient := &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   frontendSettingsTimeout(cfg),
 		Transport: transport,
 	}
 
@@ -1531,6 +1551,11 @@ func NewGrafanaClient(ctx context.Context, grafanaURL, apiKey string, auth *url.
 		ExtraHeaders:   config.ExtraHeaders,
 		SOCKS5ProxyURL: config.SOCKS5ProxyURL,
 		Logger:         config.Logger,
+		// Carried through so frontendSettingsTimeout honors the same
+		// operator-configured timeout (--grafana-timeout / GRAFANA_TIMEOUT)
+		// as the rest of this client, instead of silently reverting to
+		// DefaultGrafanaClientTimeout for this one request.
+		Timeout: config.Timeout,
 	}
 	// A failed fetch yields zero values, leaving both fields empty as before.
 	settings, _ := cachedSharedSettings(fetchCfg)

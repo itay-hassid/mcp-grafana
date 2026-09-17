@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-openapi/runtime/client"
 	grafana_client "github.com/grafana/grafana-openapi-client-go/client"
@@ -2225,6 +2226,95 @@ func TestFrontendSettingsCachesOnlySuccesses(t *testing.T) {
 		ctx := WithGrafanaConfig(context.Background(), GrafanaConfig{URL: ts.URL, OrgID: 5})
 		assert.Equal(t, "12.1.0", GrafanaVersion(ctx),
 			"a version already cached for the instance must survive this org's own fetch failing")
+	})
+}
+
+// TestFrontendSettingsTimeoutSelection is a fast, non-network unit test for
+// frontendSettingsTimeout's fallback logic, isolated from the slower
+// delayed-server tests below so the zero/default-vs-hardcoded distinction
+// doesn't require an actual multi-second wait to verify.
+func TestFrontendSettingsTimeoutSelection(t *testing.T) {
+	t.Run("uses cfg.Timeout when set", func(t *testing.T) {
+		got := frontendSettingsTimeout(&GrafanaConfig{Timeout: 3 * time.Second})
+		assert.Equal(t, 3*time.Second, got)
+	})
+
+	t.Run("falls back to DefaultGrafanaClientTimeout when unset, not a shorter hardcoded value", func(t *testing.T) {
+		got := frontendSettingsTimeout(&GrafanaConfig{})
+		assert.Equal(t, DefaultGrafanaClientTimeout, got)
+		assert.Greater(t, got, 5*time.Second,
+			"regression guard: this must not silently be the old hardcoded 5s policy")
+	})
+}
+
+// TestFrontendSettingsTimeout is a regression test for the frontend-settings
+// fetch previously hardcoding a 5-second deadline in both loadFrontendSettings
+// (the singleflight's detached fetch context) and doFetchFrontendSettings (the
+// http.Client itself), independent of GrafanaConfig.Timeout. A destination
+// whose connection setup (e.g. DNS resolution for a short/internal hostname)
+// took longer than 5s but well within a configured or default timeout would
+// fail this request even though the rest of the client would have happily
+// waited for it.
+func TestFrontendSettingsTimeout(t *testing.T) {
+	t.Cleanup(clearFrontendSettingsCaches)
+
+	// delayedFrontendSettingsServer returns a server whose /api/frontend/settings
+	// response is held for `delay` before responding, standing in for a slow
+	// destination (e.g. slow DNS or a loaded backend) rather than a slow
+	// handler specifically.
+	delayedFrontendSettingsServer := func(t *testing.T, delay time.Duration) *httptest.Server {
+		t.Helper()
+		return newTestHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"appUrl": "https://grafana.example.com", "buildInfo": {"version": "12.1.0"}}`))
+		})
+	}
+
+	t.Run("a custom timeout shorter than the response delay fails fast", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 200*time.Millisecond)
+
+		cfg := GrafanaConfig{URL: ts.URL, Timeout: 50 * time.Millisecond}
+		start := time.Now()
+		_, err := doFetchFrontendSettings(context.Background(), &cfg)
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		assert.Less(t, elapsed, 200*time.Millisecond,
+			"the configured 50ms timeout must cut the request off well before the server's 200ms delay elapses")
+	})
+
+	t.Run("loadFrontendSettings' singleflight fetch context honors the same short custom timeout", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 200*time.Millisecond)
+
+		cfg := GrafanaConfig{URL: ts.URL, Timeout: 50 * time.Millisecond}
+		start := time.Now()
+		_, err := loadFrontendSettings(&cfg)
+		elapsed := time.Since(start)
+
+		require.Error(t, err)
+		assert.Less(t, elapsed, 200*time.Millisecond,
+			"loadFrontendSettings must apply the same short timeout to its detached fetch context, not just doFetchFrontendSettings' own http.Client")
+	})
+
+	// This is the exact dm-4 scenario: a destination whose connection setup
+	// (there, DNS resolution) took longer than the old hardcoded 5s ceiling
+	// but comfortably under the configured/default timeout. It must succeed
+	// end-to-end through NewGrafanaClient, the entry point set_grafana_url and
+	// startup both use, with Timeout left unset so this also exercises the
+	// DefaultGrafanaClientTimeout fallback (not just an explicit long Timeout).
+	t.Run("NewGrafanaClient succeeds past the old hardcoded 5s ceiling using the 10s default", func(t *testing.T) {
+		t.Cleanup(clearFrontendSettingsCaches)
+		ts := delayedFrontendSettingsServer(t, 6*time.Second)
+
+		ctx := WithGrafanaConfig(context.Background(), GrafanaConfig{}) // Timeout left zero.
+		c := NewGrafanaClient(ctx, ts.URL, "test-key", nil)
+
+		require.NotNil(t, c)
+		assert.Equal(t, "12.1.0", c.Version,
+			"a >5s but <10s response must succeed now that the default timeout is honored end-to-end")
 	})
 }
 

@@ -78,11 +78,22 @@ func TestSessionManagerGrafanaOverride(t *testing.T) {
 	t.Run("untracked session is a no-op, not a panic", func(t *testing.T) {
 		sm, _, _ := newGrafanaURLTestServer(t)
 
+		var stored bool
 		assert.NotPanics(t, func() {
-			sm.SetGrafanaOverride("never-created", GrafanaOverride{URL: "https://grafana.example.com"})
+			stored = sm.SetGrafanaOverride("never-created", GrafanaOverride{URL: "https://grafana.example.com"})
 		})
+		assert.False(t, stored, "an untracked session must report that nothing was stored")
 		_, ok := sm.GrafanaOverrideForSession("never-created")
 		assert.False(t, ok)
+	})
+
+	t.Run("tracked session reports the override was stored", func(t *testing.T) {
+		sm, _, _ := newGrafanaURLTestServer(t)
+		sess := &mockClientSession{id: "s1"}
+		sm.CreateSession(context.Background(), sess)
+
+		stored := sm.SetGrafanaOverride("s1", GrafanaOverride{URL: "https://grafana.example.com"})
+		assert.True(t, stored, "a tracked session must report that the override was stored")
 	})
 
 	t.Run("different sessions have independent overrides", func(t *testing.T) {
@@ -219,6 +230,40 @@ func TestHandleSetGrafanaURL(t *testing.T) {
 
 		_, err := handleSetGrafanaURL(ctx, nil, tm, SetGrafanaURLParams{URL: "https://grafana.example.com"})
 		assert.Error(t, err)
+	})
+
+	t.Run("an untracked session is registered and its override persists (regression: previously a silent no-op)", func(t *testing.T) {
+		sm, tm, srv := newGrafanaURLTestServer(t)
+		sess := &mockClientSession{id: "s1"}
+		ctx := srv.WithContext(context.Background(), sess)
+
+		// Deliberately skip sm.CreateSession: this is the exact gap that let
+		// handleSetGrafanaURL report success while SessionManager.SetGrafanaOverride
+		// silently discarded the override for a session it had never seen, leaving
+		// every following guarded tool call to see "not configured" again.
+		result, err := handleSetGrafanaURL(ctx, sm, tm, SetGrafanaURLParams{URL: "https://grafana.example.com"})
+		require.NoError(t, err)
+		assert.Equal(t, "https://grafana.example.com", result.URL)
+
+		override, ok := sm.GrafanaOverrideForSession("s1")
+		require.True(t, ok, "the override must be readable back for the calling session")
+		assert.Equal(t, "https://grafana.example.com", override.URL)
+
+		// And the very next guarded native tool call for this session must see
+		// the configured URL, without any other setup in between.
+		next := func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			assert.Equal(t, "https://grafana.example.com", GrafanaConfigFromContext(ctx).URL)
+			return mcp.NewToolResultText("ok"), nil
+		}
+		handler := RequireGrafanaURLMiddleware(sm, nil)(next)
+		guardedCtx := WithGrafanaConfig(context.Background(), GrafanaConfig{})
+		guardedCtx = srv.WithContext(guardedCtx, sess)
+		req := mcp.CallToolRequest{}
+		req.Params.Name = "search_dashboards"
+		guardResult, err := handler(guardedCtx, req)
+		require.NoError(t, err)
+		require.NotNil(t, guardResult)
+		assert.False(t, guardResult.IsError, "the just-configured session must not be blocked as unconfigured")
 	})
 }
 
