@@ -34,7 +34,7 @@ func NewSetGrafanaURLTool(runtimeURL *RuntimeGrafanaURL) Tool {
 			return setGrafanaURL(runtimeURL, args)
 		},
 		WithTitleAnnotation("Connect to Grafana store"),
-		WithReadOnlyHintAnnotation(false),
+		WithReadOnlyHintAnnotation(true),
 		WithDestructiveHintAnnotation(false),
 		WithIdempotentHintAnnotation(true),
 		WithOpenWorldHintAnnotation(true),

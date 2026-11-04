@@ -153,4 +153,5 @@ func TestSetGrafanaURLToolIsNotOrgScoped(t *testing.T) {
 	assert.Equal(t, "Connect to Grafana store", tool.Tool.Annotations.Title)
 	assert.Contains(t, tool.Tool.Description, "Call this first")
 	assert.Contains(t, tool.Tool.Description, "tesco-6")
+	assert.True(t, tool.Tool.Annotations.ReadOnlyHint)
 }
